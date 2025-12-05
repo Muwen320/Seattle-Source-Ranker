@@ -3,98 +3,12 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import "./App.css";
 import { Link, useSearchParams } from "react-router-dom";
 
-// Scoring configuration - PyPI segment gap bonus approach
-// We treat the backend GitHub score as the base score (0–1,000,000).
-// All Python projects are split into 4 groups by base score quartiles.
-// Inside each group, PyPI projects get a small bonus based on the gap
-// to that group's upper bound, so they do not "jump" too far across groups.
+// Scoring configuration - PyPI gap bonus approach
+// MAX_SSR_SCORE should match the backend GitHub score scale (0–1,000,000).
+// For PyPI projects: finalScore = baseScore + PYPI_GAP_BONUS_RATE * (MAX_SSR_SCORE - baseScore),
+// which gives a larger relative boost to lower-scoring projects.
 const MAX_SSR_SCORE = 1000000;
-const PYPI_GAP_BONUS_RATE = 0.05; // 5% of (segmentMax - baseScore)
-
-/**
- * Compute quartile thresholds (q1, q2, q3) and global max based on base scores.
- * This is used to define segment upper bounds for the PyPI bonus.
- */
-function computeQuartileThresholds(scores) {
-    if (!scores || scores.length === 0) {
-        return { q1: 0, q2: 0, q3: 0, max: MAX_SSR_SCORE };
-    }
-
-    const sorted = [...scores].sort((a, b) => a - b);
-
-    const pickPercentile = (p) => {
-        const idx = Math.floor(p * (sorted.length - 1));
-        return sorted[idx];
-    };
-
-    const q1 = pickPercentile(0.25);
-    const q2 = pickPercentile(0.5);
-    const q3 = pickPercentile(0.75);
-    const max = Math.min(sorted[sorted.length - 1], MAX_SSR_SCORE);
-
-    return { q1, q2, q3, max };
-}
-
-/**
- * Given a base score and quartile thresholds, find the segment upper bound.
- * - Segment 1: base <= q1      -> upper bound = q1
- * - Segment 2: q1 < base <= q2 -> upper bound = q2
- * - Segment 3: q2 < base <= q3 -> upper bound = q3
- * - Segment 4: base > q3       -> upper bound = max
- *
- * If thresholds collapse (e.g., many zeros), we fall back to MAX_SSR_SCORE.
- */
-function getSegmentMax(baseScore, thresholds) {
-    const { q1, q2, q3, max } = thresholds || {};
-    const safeMax = max || MAX_SSR_SCORE;
-
-    // Guard against fully-degenerate thresholds
-    if (q1 === 0 && q2 === 0 && q3 === 0 && max === 0) {
-        return safeMax;
-    }
-
-    if (baseScore <= q1) {
-        return q1 || safeMax;
-    }
-    if (baseScore <= q2) {
-        return q2 || safeMax;
-    }
-    if (baseScore <= q3) {
-        return q3 || safeMax;
-    }
-    return safeMax;
-}
-
-/**
- * Compute final score for a single project given:
- * - baseScore: GitHub score from backend
- * - onPypi: whether the project has a PyPI package
- * - thresholds: quartile-based segment thresholds
- *
- * For PyPI projects:
- *   bonus = PYPI_GAP_BONUS_RATE * (segmentMax - baseScore)
- *   final = baseScore + bonus, clamped to segmentMax
- *
- * For non-PyPI projects:
- *   final = baseScore (no extra bonus)
- */
-function computeFinalScoreWithSegmentBonus(baseScore, onPypi, thresholds) {
-    let finalScore = baseScore || 0;
-
-    if (onPypi && thresholds) {
-        const segmentMax = getSegmentMax(finalScore, thresholds);
-        const gap = Math.max(0, segmentMax - finalScore);
-        const bonus = PYPI_GAP_BONUS_RATE * gap;
-        finalScore = finalScore + bonus;
-        // Do not allow crossing the segment upper bound
-        finalScore = Math.min(segmentMax, finalScore);
-    }
-
-    // Also clamp to global theoretical max just in case
-    finalScore = Math.min(MAX_SSR_SCORE, finalScore);
-
-    return Math.round(finalScore);
-}
+const PYPI_GAP_BONUS_RATE = 0.05;
 
 export default function PythonRankingsPage() {
     const [searchParams, setSearchParams] = useSearchParams();
@@ -231,15 +145,6 @@ export default function PythonRankingsPage() {
                 firstBatch.forEach(pageData => {
                     allProjects.push(...pageData);
                 });
-
-                // Compute quartile thresholds based on base scores of all loaded projects
-                const baseScoresInitial = allProjects.map(proj => proj.score || 0);
-                const thresholdsInitial = computeQuartileThresholds(baseScoresInitial);
-
-                // Expose thresholds for manual debugging/testing in the browser console
-                if (typeof window !== "undefined") {
-                    window.__PYTHON_PYPI_THRESHOLDS__ = thresholdsInitial;
-                }
                 
                 // Calculate initial scores and display first 10 pages
                 let scoredProjects = allProjects.map(proj => {
@@ -248,12 +153,19 @@ export default function PythonRankingsPage() {
                     const onPypi = pypiMap.has(key);
                     const baseScore = proj.score || 0;
 
-                    // Apply quartile-based segment bonus for PyPI projects
-                    const finalScore = computeFinalScoreWithSegmentBonus(
-                        baseScore,
-                        onPypi,
-                        thresholdsInitial
-                    );
+                    // Start from the base GitHub score produced by the backend.
+                    let finalScore = baseScore;
+
+                    // If the project has a PyPI package, add a bonus:
+                    // bonus = PYPI_GAP_BONUS_RATE * (MAX_SSR_SCORE - baseScore).
+                    // This pulls lower-scoring projects up more and high-scoring ones a bit less.
+                    if (onPypi) {
+                        const bonus = PYPI_GAP_BONUS_RATE * Math.max(0, MAX_SSR_SCORE - baseScore);
+                        finalScore = baseScore + bonus;
+                    }
+
+                    // Clamp to the theoretical max to avoid small overshoots.
+                    finalScore = Math.min(MAX_SSR_SCORE, finalScore);
                     
                     return {
                         ...proj,
@@ -262,7 +174,7 @@ export default function PythonRankingsPage() {
                         full_name: proj.name,
                         url: proj.html_url,
                         original_score: baseScore,
-                        final_score: finalScore,
+                        final_score: Math.round(finalScore),
                         on_pypi: onPypi
                     };
                 });
@@ -292,7 +204,7 @@ export default function PythonRankingsPage() {
                     for (let batchStart = initialPages + 1; batchStart <= pythonPages; batchStart += batchSize) {
                         // Check if scrolling before each batch
                         if (isScrolling) {
-                            console.log("⏸️ Pausing background loading due to scroll");
+                            console.log('⏸️ Pausing background loading due to scroll');
                             break;
                         }
                         
@@ -312,27 +224,26 @@ export default function PythonRankingsPage() {
                             allProjects.push(...pageData);
                         });
                         
-                        // Re-compute quartile thresholds whenever more projects are loaded
-                        const baseScoresAll = allProjects.map(proj => proj.score || 0);
-                        const thresholdsAll = computeQuartileThresholds(baseScoresAll);
-
-                        // Update debug thresholds for testing
-                        if (typeof window !== "undefined") {
-                            window.__PYTHON_PYPI_THRESHOLDS__ = thresholdsAll;
-                        }
-                        
-                        // Recalculate and update all projects using updated thresholds
+                        // Recalculate and update all projects
                         scoredProjects = allProjects.map(proj => {
                             const [owner, projectName] = proj.name.split('/');
                             const key = proj.name.toLowerCase();
                             const onPypi = pypiMap.has(key);
                             const baseScore = proj.score || 0;
 
-                            const finalScore = computeFinalScoreWithSegmentBonus(
-                                baseScore,
-                                onPypi,
-                                thresholdsAll
-                            );
+                            // Start from the base GitHub score produced by the backend.
+                            let finalScore = baseScore;
+
+                            // If the project has a PyPI package, add a bonus:
+                            // bonus = PYPI_GAP_BONUS_RATE * (MAX_SSR_SCORE - baseScore).
+                            // This pulls lower-scoring projects up more and high-scoring ones a bit less.
+                            if (onPypi) {
+                                const bonus = PYPI_GAP_BONUS_RATE * Math.max(0, MAX_SSR_SCORE - baseScore);
+                                finalScore = baseScore + bonus;
+                            }
+
+                            // Clamp to the theoretical max to avoid small overshoots.
+                            finalScore = Math.min(MAX_SSR_SCORE, finalScore);
                             
                             return {
                                 ...proj,
@@ -341,7 +252,7 @@ export default function PythonRankingsPage() {
                                 full_name: proj.name,
                                 url: proj.html_url,
                                 original_score: baseScore,
-                                final_score: finalScore,
+                                final_score: Math.round(finalScore),
                                 on_pypi: onPypi
                             };
                         });
@@ -403,31 +314,31 @@ export default function PythonRankingsPage() {
         
         // Add owner suggestions
         Array.from(ownerSet).forEach(owner => {
-            suggestions.push({ text: owner, type: "owner", icon: "👤" });
+            suggestions.push({ text: owner, type: 'owner', icon: '👤' });
         });
         
         // Add popular Python-related topics
         const popularTopics = [
-            "machine-learning", "deep-learning", "artificial-intelligence", "neural-networks",
-            "data-science", "data-analysis", "visualization", "pandas", "numpy",
-            "tensorflow", "pytorch", "scikit-learn", "keras",
-            "web-scraping", "flask", "django", "fastapi",
-            "api", "rest", "graphql", "automation",
-            "testing", "pytest", "unittest",
-            "database", "sql", "nosql", "mongodb", "postgresql",
-            "cli", "command-line", "tool", "utility",
-            "parser", "compiler", "interpreter"
+            'machine-learning', 'deep-learning', 'artificial-intelligence', 'neural-networks',
+            'data-science', 'data-analysis', 'visualization', 'pandas', 'numpy',
+            'tensorflow', 'pytorch', 'scikit-learn', 'keras',
+            'web-scraping', 'flask', 'django', 'fastapi',
+            'api', 'rest', 'graphql', 'automation',
+            'testing', 'pytest', 'unittest',
+            'database', 'sql', 'nosql', 'mongodb', 'postgresql',
+            'cli', 'command-line', 'tool', 'utility',
+            'parser', 'compiler', 'interpreter'
         ];
         
         popularTopics.forEach(topic => {
             if (topic.toLowerCase().includes(query)) {
-                suggestions.push({ text: topic, type: "topic", icon: "🏷️" });
+                suggestions.push({ text: topic, type: 'topic', icon: '🏷️' });
             }
         });
         
         // Sort: owners first, then topics; both alphabetically
         suggestions.sort((a, b) => {
-            if (a.type !== b.type) return a.type === "owner" ? -1 : 1;
+            if (a.type !== b.type) return a.type === 'owner' ? -1 : 1;
             return a.text.localeCompare(b.text);
         });
         
@@ -443,7 +354,7 @@ export default function PythonRankingsPage() {
 
         // Only clear when search is cleared
         if (!searchQuery.trim()) {
-            setDebouncedSearchQuery("");
+            setDebouncedSearchQuery('');
         }
     }, [searchQuery]);
 
@@ -455,11 +366,11 @@ export default function PythonRankingsPage() {
         // Update URL with search
         const newParams = new URLSearchParams(searchParams);
         if (searchQuery.trim()) {
-            newParams.set("search", searchQuery);
+            newParams.set('search', searchQuery);
         } else {
-            newParams.delete("search");
+            newParams.delete('search');
         }
-        newParams.set("page", "1");
+        newParams.set('page', '1');
         setSearchParams(newParams);
     };
 
@@ -467,7 +378,7 @@ export default function PythonRankingsPage() {
     const updatePage = (newPage) => {
         setCurrentPage(newPage);
         const newParams = new URLSearchParams(searchParams);
-        newParams.set("page", newPage.toString());
+        newParams.set('page', newPage.toString());
         setSearchParams(newParams);
     };
 
@@ -478,15 +389,15 @@ export default function PythonRankingsPage() {
         
         // If clicking the same owner, clear search and return to previous page
         if (activeOwner === ownerName) {
-            setSearchQuery("");
-            setDebouncedSearchQuery("");
+            setSearchQuery('');
+            setDebouncedSearchQuery('');
             setActiveOwner(null);
             // Return to the page we were on before the search
             const returnPage = pageBeforeSearchRef.current;
             setCurrentPage(returnPage);
             const newParams = new URLSearchParams(searchParams);
-            newParams.delete("search");
-            newParams.set("page", returnPage.toString());
+            newParams.delete('search');
+            newParams.set('page', returnPage.toString());
             setSearchParams(newParams);
         } else {
             // Remember current page before starting new owner search
@@ -498,19 +409,19 @@ export default function PythonRankingsPage() {
             setCurrentPage(1);
             // Update URL with search parameter
             const newParams = new URLSearchParams(searchParams);
-            newParams.set("search", ownerName);
-            newParams.set("page", "1");
+            newParams.set('search', ownerName);
+            newParams.set('page', '1');
             setSearchParams(newParams);
         }
         
         // Scroll to position between header and search bar after data loads
         setTimeout(() => {
-            const headerElement = document.querySelector("header");
+            const headerElement = document.querySelector('header');
             if (headerElement) {
                 const headerBottom = headerElement.getBoundingClientRect().bottom + window.pageYOffset;
                 // Use requestAnimationFrame for smoother scroll
                 requestAnimationFrame(() => {
-                    window.scrollTo({ top: headerBottom - 20, behavior: "smooth" });
+                    window.scrollTo({ top: headerBottom - 20, behavior: 'smooth' });
                 });
             }
         }, 500);
@@ -530,9 +441,9 @@ export default function PythonRankingsPage() {
             }
         };
 
-        document.addEventListener("mousedown", handleClickOutside);
+        document.addEventListener('mousedown', handleClickOutside);
         return () => {
-            document.removeEventListener("mousedown", handleClickOutside);
+            document.removeEventListener('mousedown', handleClickOutside);
         };
     }, []);
 
@@ -550,9 +461,7 @@ export default function PythonRankingsPage() {
 
     // Pagination - use total from metadata when not searching
     const displayTotal = debouncedSearchQuery.trim() ? filteredProjects.length : totalProjects;
-    const totalPages = Math.ceil(
-        (debouncedSearchQuery.trim() ? filteredProjects.length : totalProjects) / projectsPerPage
-    );
+    const totalPages = Math.ceil((debouncedSearchQuery.trim() ? filteredProjects.length : totalProjects) / projectsPerPage);
     const startIndex = (currentPage - 1) * projectsPerPage;
     const currentProjects = filteredProjects.slice(startIndex, startIndex + projectsPerPage);
 
@@ -561,10 +470,10 @@ export default function PythonRankingsPage() {
             updatePage(page);
             // Scroll to position between header and search bar
             setTimeout(() => {
-                const headerElement = document.querySelector("header");
+                const headerElement = document.querySelector('header');
                 if (headerElement) {
                     const headerBottom = headerElement.getBoundingClientRect().bottom + window.pageYOffset;
-                    window.scrollTo({ top: headerBottom - 20, behavior: "smooth" });
+                    window.scrollTo({ top: headerBottom - 20, behavior: 'smooth' });
                 }
             }, 100);
         }
@@ -597,7 +506,7 @@ export default function PythonRankingsPage() {
                         onChange={(e) => setSearchQuery(e.target.value)}
                         onFocus={() => searchSuggestions.length > 0 && setShowSuggestions(true)}
                         onKeyDown={(e) => {
-                            if (e.key === "Enter") {
+                            if (e.key === 'Enter') {
                                 e.preventDefault();
                                 if (selectedSuggestionIndex >= 0 && searchSuggestions.length > 0) {
                                     // Select suggestion and search
@@ -616,15 +525,15 @@ export default function PythonRankingsPage() {
                             
                             if (!showSuggestions || searchSuggestions.length === 0) return;
                             
-                            if (e.key === "ArrowDown") {
+                            if (e.key === 'ArrowDown') {
                                 e.preventDefault();
                                 setSelectedSuggestionIndex(prev => 
                                     prev < searchSuggestions.length - 1 ? prev + 1 : prev
                                 );
-                            } else if (e.key === "ArrowUp") {
+                            } else if (e.key === 'ArrowUp') {
                                 e.preventDefault();
                                 setSelectedSuggestionIndex(prev => prev > 0 ? prev - 1 : -1);
-                            } else if (e.key === "Escape") {
+                            } else if (e.key === 'Escape') {
                                 setShowSuggestions(false);
                                 setSelectedSuggestionIndex(-1);
                             }
@@ -634,8 +543,8 @@ export default function PythonRankingsPage() {
                         <button
                             className="clear-search-btn"
                             onClick={() => {
-                                setSearchQuery("");
-                                setDebouncedSearchQuery("");
+                                setSearchQuery('');
+                                setDebouncedSearchQuery('');
                                 setCurrentPage(1);
                                 setShowSuggestions(false);
                                 setActiveOwner(null);
@@ -652,7 +561,7 @@ export default function PythonRankingsPage() {
                             {searchSuggestions.map((suggestion, index) => (
                                 <div
                                     key={`${suggestion.type}-${suggestion.text}`}
-                                    className={`suggestion-item ${index === selectedSuggestionIndex ? "selected" : ""}`}
+                                    className={`suggestion-item ${index === selectedSuggestionIndex ? 'selected' : ''}`}
                                     onMouseDown={(e) => {
                                         e.preventDefault(); // Prevent input blur
                                         const selectedText = suggestion.text;
@@ -669,10 +578,10 @@ export default function PythonRankingsPage() {
                                         <span className="suggestion-icon">{suggestion.icon}</span>
                                         <span className="suggestion-text">{suggestion.text}</span>
                                     </div>
-                                    {suggestion.type === "owner" && (
+                                    {suggestion.type === 'owner' && (
                                         <span className="suggestion-badge">User</span>
                                     )}
-                                    {suggestion.type === "topic" && (
+                                    {suggestion.type === 'topic' && (
                                         <span className="suggestion-badge">Topic</span>
                                     )}
                                 </div>
@@ -703,33 +612,22 @@ export default function PythonRankingsPage() {
                             <tbody>
                                 {currentProjects.map((project, index) => {
                                     const displayRank = project.global_rank || (startIndex + index + 1);
-                                    const topScore =
-                                        filteredProjects.length > 0
-                                            ? filteredProjects[0].final_score || 1
-                                            : 1;
                                     const barWidth = project.final_score > 0
-                                        ? Math.max(
-                                              15,
-                                              Math.min(100, (project.final_score / topScore) * 100)
-                                          )
+                                        ? Math.max(15, Math.min(100, (project.final_score / filteredProjects[0].final_score) * 100))
                                         : 15;
 
                                     return (
                                         <tr 
                                             key={project.full_name} 
-                                            className={updatingRows ? "row-updating" : ""}
+                                            className={updatingRows ? 'row-updating' : ''}
                                             style={updatingRows ? { animationDelay: `${index * 0.03}s` } : {}}
                                         >
                                             <td className="rank-col">#{displayRank}</td>
                                             <td className="owner-col">
                                                 <span
-                                                    className={`owner-link ${activeOwner === project.owner ? "owner-active" : ""}`}
+                                                    className={`owner-link ${activeOwner === project.owner ? 'owner-active' : ''}`}
                                                     onClick={() => handleOwnerClick(project.owner)}
-                                                    title={
-                                                        activeOwner === project.owner
-                                                            ? "Click to clear search"
-                                                            : `Search for ${project.owner}`
-                                                    }
+                                                    title={activeOwner === project.owner ? `Click to clear search` : `Search for ${project.owner}`}
                                                 >
                                                     {project.owner}
                                                 </span>
@@ -783,7 +681,7 @@ export default function PythonRankingsPage() {
                                                     </a>
                                                     {hoveredProject === project.full_name && (
                                                         <div 
-                                                            className={`tooltip ${tooltipPosition[project.full_name] ? "tooltip-above" : ""}`}
+                                                            className={`tooltip ${tooltipPosition[project.full_name] ? 'tooltip-above' : ''}`}
                                                             onMouseEnter={() => {
                                                                 if (timeoutRef.current) {
                                                                     clearTimeout(timeoutRef.current);
@@ -806,8 +704,7 @@ export default function PythonRankingsPage() {
                                                                     </div>
                                                                 )}
                                                                 <div style={{ marginBottom: "8px" }}>
-                                                                    <strong>Description:</strong>{" "}
-                                                                    {project.description || "No description available"}
+                                                                    <strong>Description:</strong> {project.description || "No description available"}
                                                                 </div>
                                                                 <div>
                                                                     ⭐ {project.stars.toLocaleString()} stars | 👁️{" "}
@@ -839,8 +736,7 @@ export default function PythonRankingsPage() {
                     >
                         {!debouncedSearchQuery.trim() ? (
                             <>
-                                Showing {startIndex + 1}-
-                                {Math.min(startIndex + projectsPerPage, filteredProjects.length)}{" "}
+                                Showing {startIndex + 1}-{Math.min(startIndex + projectsPerPage, filteredProjects.length)}{" "}
                                 of {displayTotal.toLocaleString()} projects
                             </>
                         ) : (
@@ -859,14 +755,7 @@ export default function PythonRankingsPage() {
                                 className="pagination-btn pagination-edge"
                                 onClick={() => {
                                     updatePage(1);
-                                    setTimeout(
-                                        () =>
-                                            window.scrollTo({
-                                                top: 0,
-                                                behavior: "smooth"
-                                            }),
-                                        100
-                                    );
+                                    setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 100);
                                 }}
                                 disabled={currentPage === 1}
                             >
@@ -893,7 +782,7 @@ export default function PythonRankingsPage() {
                                         }
                                     }}
                                     onKeyDown={(e) => {
-                                        if (e.key === "Enter") {
+                                        if (e.key === 'Enter') {
                                             e.preventDefault();
                                             const pageNum = parseInt(pageInput);
                                             if (pageNum >= 1 && pageNum <= totalPages) {
@@ -901,15 +790,15 @@ export default function PythonRankingsPage() {
                                                 setPageInput(null);
                                             }
                                             e.target.blur();
-                                        } else if (e.key === "Escape") {
+                                        } else if (e.key === 'Escape') {
                                             setPageInput(null);
                                             e.target.blur();
-                                        } else if (e.key === "ArrowUp") {
+                                        } else if (e.key === 'ArrowUp') {
                                             e.preventDefault();
                                             const current = parseInt(pageInput) || currentPage;
                                             const newPage = Math.min(totalPages, current + 1);
                                             setPageInput(newPage.toString());
-                                        } else if (e.key === "ArrowDown") {
+                                        } else if (e.key === 'ArrowDown') {
                                             e.preventDefault();
                                             const current = parseInt(pageInput) || currentPage;
                                             const newPage = Math.max(1, current - 1);
@@ -945,81 +834,4 @@ export default function PythonRankingsPage() {
             )}
         </div>
     );
-}
-
-/**
- * Debug helper (manual test):
- * Compare how much PyPI bonus changes rankings for pairs of nearby base scores.
- *
- * Usage in browser console:
- *   // After the Python page has loaded:
- *   runPythonPypiBonusTest();
- *
- * It will print 5 pairs per segment (4 segments total):
- *   - For each segment, choose two close base scores (one with PyPI, one without),
- *     then log base scores, final scores, and the difference.
- */
-function runPythonPypiBonusTest(thresholdsInput) {
-    const thresholds =
-        thresholdsInput ||
-        (typeof window !== "undefined" ? window.__PYTHON_PYPI_THRESHOLDS__ : null);
-
-    if (!thresholds) {
-        console.log(
-            "[PYPI TEST] No thresholds available. " +
-                "Open the Python rankings page first so thresholds can be computed."
-        );
-        return;
-    }
-
-    console.log("[PYPI TEST] Using thresholds:", thresholds);
-
-    const { q1, q2, q3, max } = thresholds;
-    const segments = [
-        { name: "Segment 1 (<= q1)", from: 0, to: q1 },
-        { name: "Segment 2 (q1 ~ q2]", from: q1, to: q2 },
-        { name: "Segment 3 (q2 ~ q3]", from: q2, to: q3 },
-        { name: "Segment 4 (> q3)", from: q3, to: max || MAX_SSR_SCORE }
-    ];
-
-    segments.forEach((seg) => {
-        const width = Math.max(1, seg.to - seg.from);
-        if (width <= 0) {
-            console.log(`\n[${seg.name}] Skipped (degenerate segment: from=${seg.from}, to=${seg.to})`);
-            return;
-        }
-
-        console.log(
-            `\n[${seg.name}] from=${Math.round(seg.from)} to=${Math.round(seg.to)}`
-        );
-        for (let i = 0; i < 5; i++) {
-            // Sample two nearby base scores inside this segment
-            const baseNoPypi =
-                seg.from + Math.random() * 0.9 * width; // avoid very end
-            const baseWithPypi = baseNoPypi * 1.02; // 2% higher, "close" pair
-
-            const finalNoPypi = computeFinalScoreWithSegmentBonus(
-                baseNoPypi,
-                false,
-                thresholds
-            );
-            const finalWithPypi = computeFinalScoreWithSegmentBonus(
-                baseWithPypi,
-                true,
-                thresholds
-            );
-
-            console.log(
-                `  Pair ${i + 1}: ` +
-                    `base_no=${Math.round(baseNoPypi)}, base_yes=${Math.round(baseWithPypi)} | ` +
-                    `final_no=${finalNoPypi}, final_yes=${finalWithPypi}, ` +
-                    `diff=${finalWithPypi - finalNoPypi}`
-            );
-        }
-    });
-}
-
-// Attach debug helper to window so it can be called from DevTools.
-if (typeof window !== "undefined") {
-    window.runPythonPypiBonusTest = runPythonPypiBonusTest;
 }
