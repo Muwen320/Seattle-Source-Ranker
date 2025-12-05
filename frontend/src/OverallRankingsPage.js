@@ -1311,14 +1311,14 @@ export default function OverallRankingsPage() {
                         // Use global rank if available, otherwise calculate from page
                         const displayRank = repo.global_rank || ((currentPage - 1) * 50 + index + 1);
                         const barWidth = (repo.score / maxScore) * 100;
-                        // Handle score display: remove "0.", e.g., 0.88 -> 88, 1.23 -> 123
-                        let displayScore;
-                        if (repo.score < 1) {
-                            displayScore = (repo.score * 100).toFixed(0);
-                        } else {
-                            displayScore = (repo.score * 100).toFixed(0);
-                        }
 
+                        // Handle score display: use original base score (no extra scaling)
+                        let displayScore;
+                        if (Number.isFinite(repo.score)) {
+                            displayScore = Math.round(repo.score).toLocaleString();
+                        } else {
+                               displayScore = "-";
+                        }
                         // Extract project name (remove owner/ prefix)
                         const projectName = repo.name.includes("/")
                             ? repo.name.split("/")[1]

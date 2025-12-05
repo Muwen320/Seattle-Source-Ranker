@@ -108,10 +108,14 @@ def calculate_github_score(project, _max_stars=None, _max_forks=None, _max_watch
       - Activity: 10% (recent maintenance)
       - Health: 10% (issue management)
 
-    Uses logarithmic scaling for better distribution
+    Uses logarithmic scaling for better distribution.
 
-    Note: max_stars, max_forks, max_watchers parameters are kept for backward
-    compatibility with tests but are no longer used in the scoring calculation.
+    Note:
+      - max_stars, max_forks, max_watchers parameters are kept for backward
+        compatibility with tests but are no longer used in the scoring calculation.
+      - This function now returns a float "raw_score" (scaled to ~[0, 1,000,000])
+        and does NOT round to int here. Rounding is done later after all
+        adjustments (e.g., language penalties) to preserve precision.
     """
     stars = project.get('stars', 0)
     forks = project.get('forks', 0)
@@ -131,13 +135,20 @@ def calculate_github_score(project, _max_stars=None, _max_forks=None, _max_watch
     health_score = health_factor(open_issues, stars) * 0.10
 
     # Total score (0-1 range)
-    normalized_score = (stars_score + forks_score + watchers_score +
-                       age_score + activity_score + health_score)
+    normalized_score = (
+        stars_score
+        + forks_score
+        + watchers_score
+        + age_score
+        + activity_score
+        + health_score
+    )
 
-    # Scale to 0-10000 for better readability
-    final_score = int(normalized_score * 10000)
+    # Scale to 0-1000000 for better readability.
+    # Keep this as a float to avoid losing precision too early; rounding is done later.
+    raw_score = normalized_score * 1000000
 
-    return final_score
+    return raw_score
 
 def classify_language(language):
     """Classify language into major categories for frontend display.
@@ -181,7 +192,7 @@ def format_project(project, score, display_language=None):
 
     Args:
         project: Raw project data
-        score: Calculated score (already penalized if needed)
+        score: Calculated score (already adjusted and rounded if needed)
         display_language: Language to display (defaults to original if not specified)
     """
     return {
@@ -233,12 +244,20 @@ def main():
     all_projects = []
 
     for project in projects:
+        # Step 1: compute base GitHub score as a float (scaled to ~[0, 1,000,000])
         base_score = calculate_github_score(project)
+
+        # Step 2: classify language and detect "true other" (missing/unknown language)
         category, original_lang, is_true_other = classify_language(project.get('language'))
 
-        # Apply penalty for truly unrecognized languages
-        final_score = base_score * 0.8 if is_true_other else base_score
+        # Step 3: apply penalty for truly unrecognized languages on the float score
+        adjusted_score = base_score * 0.8 if is_true_other else base_score
 
+        # Step 4: round once at the very end to get a stable integer score
+        # Using round() instead of truncation avoids systematic downward bias.
+        final_score = int(round(adjusted_score))
+
+        # Step 5: format project for frontend
         formatted = format_project(project, final_score, original_lang)
         by_language[category].append(formatted)
         all_projects.append(formatted)
