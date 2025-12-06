@@ -214,7 +214,7 @@ export default function ScoringPage() {
                     repositories.
                 </p>
 
-                {/* 6.5 Python PyPI Bonus */}
+                                {/* 6.5 Python PyPI Bonus */}
                 <h2 style={{ color: "#7dd3fc", marginTop: "30px" }}>
                     6.5 Python Projects: PyPI Integration Bonus
                 </h2>
@@ -247,10 +247,25 @@ export default function ScoringPage() {
                     </li>
                 </ul>
 
-                <h3 style={{ color: "#bae6fd", marginTop: "18px" }}>The PyPI Multiplier</h3>
+                <h3 style={{ color: "#bae6fd", marginTop: "18px" }}>Two-Tier PyPI Bonus</h3>
                 <p>
-                    Python projects that are published on PyPI receive a <strong>10% score bonus</strong>:
+                    Python projects can receive up to about <strong>15.5% total</strong> bonus on top of their
+                    base SSR score, in two multiplicative tiers:
                 </p>
+
+                <ul style={{ marginLeft: "20px" }}>
+                    <li>
+                        <strong>Tier 1 – Has a PyPI package (+5%)</strong><br />
+                        If a project appears in <code>data/seattle_pypi_projects.json</code>, its score is
+                        multiplied by <code>1.05</code>.
+                    </li>
+                    <li style={{ marginTop: "6px" }}>
+                        <strong>Tier 2 – High-impact PyPI package (+10% more)</strong><br />
+                        If the same project is also matched in{" "}
+                        <code>data/seattle_top_pypi_matches.json</code> (top 15,000 PyPI packages),
+                        the result is multiplied by an additional <code>1.10</code>.
+                    </li>
+                </ul>
 
                 <pre
                     style={{
@@ -261,17 +276,21 @@ export default function ScoringPage() {
                         color: "#9ecbff",
                         overflowX: "auto"
                     }}
-                >{`Python Project Final Score = Base SSR Score × 1.1  (if on PyPI)
-                               = Base SSR Score × 1.0  (if not on PyPI)`}</pre>
+                >{`Base SSR Score   = score from GitHub metrics (0–1,000,000 scale)
+
+Python Final Score =
+    Base × 1.05              if project has a PyPI package
+    Base × 1.05 × 1.10 ≈ 1.155 × Base
+                             if package is also in the top 15,000 on PyPI
+    Base                     if not on PyPI`}</pre>
 
                 <p style={{ marginTop: "10px" }}>
-                    This bonus is applied <em>after</em> the base SSR score calculation, ensuring that:
+                    Because this is a <em>multiplicative</em> bonus, it never reverses the relative ordering
+                    of two projects that both have or both lack PyPI packages: if project A originally has a
+                    higher GitHub score than project B, A will still score higher after applying the same
+                    multiplier. PyPI acts as a clear but bounded boost for distributed, high-impact packages,
+                    while preserving the core GitHub-based ranking.
                 </p>
-                <ul style={{ marginLeft: "20px" }}>
-                    <li>Projects must still have strong fundamentals (stars, activity, health) to rank highly</li>
-                    <li>PyPI publication acts as a tiebreaker and quality signal, not a dominant factor</li>
-                    <li>The ranking remains fair to both published packages and development-focused repositories</li>
-                </ul>
 
                 <h3 style={{ color: "#bae6fd", marginTop: "18px" }}>PyPI Badge Indicator</h3>
                 <p>

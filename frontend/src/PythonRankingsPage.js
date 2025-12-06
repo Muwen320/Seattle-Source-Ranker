@@ -3,12 +3,13 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import "./App.css";
 import { Link, useSearchParams } from "react-router-dom";
 
-// Scoring configuration - PyPI gap bonus approach
-// MAX_SSR_SCORE should match the backend GitHub score scale (0–1,000,000).
-// For PyPI projects: finalScore = baseScore + PYPI_GAP_BONUS_RATE * (MAX_SSR_SCORE - baseScore),
-// which gives a larger relative boost to lower-scoring projects.
-const MAX_SSR_SCORE = 1000000;
-const PYPI_GAP_BONUS_RATE = 0.05;
+// Scoring configuration – tiered multiplicative PyPI bonus.
+// Base GitHub score (proj.score) comes from backend SSR (roughly 0–10,000).
+// Tier 1: any PyPI package        → ×1.05
+// Tier 2: top-15k PyPI package    → ×1.10 (on top of Tier 1)
+// Maximum bonus ≈ 1.05 × 1.10 = 1.155 (~+15.5%)
+const PYPI_TIER1_MULTIPLIER = 1.05;
+const PYPI_TIER2_MULTIPLIER = 1.10;
 
 export default function PythonRankingsPage() {
     const [searchParams, setSearchParams] = useSearchParams();
@@ -49,8 +50,8 @@ export default function PythonRankingsPage() {
 
     // Restore state from URL parameters on mount and when URL changes
     useEffect(() => {
-        const searchParam = searchParams.get('search');
-        const pageParam = searchParams.get('page');
+        const searchParam = searchParams.get("search");
+        const pageParam = searchParams.get("page");
         
         // Restore search state
         if (searchParam !== null) {
@@ -61,9 +62,9 @@ export default function PythonRankingsPage() {
             }
         } else {
             // Clear search if no search param in URL
-            if (debouncedSearchQueryRef.current !== '') {
-                setSearchQuery('');
-                setDebouncedSearchQuery('');
+            if (debouncedSearchQueryRef.current !== "") {
+                setSearchQuery("");
+                setDebouncedSearchQuery("");
                 setActiveOwner(null);
             }
         }
@@ -89,9 +90,9 @@ export default function PythonRankingsPage() {
             }, 150);
         };
 
-        window.addEventListener('scroll', handleScroll, { passive: true });
+        window.addEventListener("scroll", handleScroll, { passive: true });
         return () => {
-            window.removeEventListener('scroll', handleScroll);
+            window.removeEventListener("scroll", handleScroll);
             if (scrollTimeoutRef.current) {
                 clearTimeout(scrollTimeoutRef.current);
             }
@@ -110,21 +111,41 @@ export default function PythonRankingsPage() {
                 const pythonTotal = metadataData.languages.Python?.total || 0;
                 setTotalProjects(pythonTotal);
                 
-                // Load PyPI data
+                // Load PyPI data (Tier 1: all PyPI packages)
                 let pypiData = null;
                 try {
-                    const pypiRes = await fetch(`${process.env.PUBLIC_URL}/data/seattle_pypi_projects.json`);
+                    const pypiRes = await fetch(
+                        `${process.env.PUBLIC_URL}/data/seattle_pypi_projects.json`
+                    );
                     pypiData = await pypiRes.json();
                 } catch (error) {
                     console.warn("PyPI data not available:", error);
                     pypiData = { projects: [] };
                 }
+
+                // Load Top PyPI matches (Tier 2: top-15k PyPI packages)
+                let topPypiData = null;
+                try {
+                    const topRes = await fetch(
+                        `${process.env.PUBLIC_URL}/data/seattle_top_pypi_matches.json`
+                    );
+                    topPypiData = await topRes.json();
+                } catch (error) {
+                    console.warn("Top PyPI matches data not available:", error);
+                    topPypiData = { projects: [] };
+                }
                 
-                // Build PyPI lookup map
+                // Build PyPI lookup maps
                 const pypiMap = new Map();
-                pypiData.projects.forEach(p => {
+                (pypiData.projects || []).forEach((p) => {
                     const key = `${p.owner}/${p.name}`.toLowerCase();
-                    pypiMap.set(key, p);
+                    pypiMap.set(key, true);
+                });
+
+                const topPypiMap = new Map();
+                (topPypiData.projects || topPypiData.matches || []).forEach((p) => {
+                    const key = `${p.owner}/${p.name}`.toLowerCase();
+                    topPypiMap.set(key, true);
                 });
                 
                 // Load first 10 pages for quick display
@@ -135,47 +156,47 @@ export default function PythonRankingsPage() {
                 for (let i = 1; i <= initialPages; i++) {
                     initialPromises.push(
                         fetch(`${process.env.PUBLIC_URL}/pages/python/page_${i}.json`)
-                            .then(res => res.json())
+                            .then((res) => res.json())
                             .catch(() => [])
                     );
                 }
                 
                 const firstBatch = await Promise.all(initialPromises);
                 const allProjects = [];
-                firstBatch.forEach(pageData => {
+                firstBatch.forEach((pageData) => {
                     allProjects.push(...pageData);
                 });
                 
                 // Calculate initial scores and display first 10 pages
-                let scoredProjects = allProjects.map(proj => {
-                    const [owner, projectName] = proj.name.split('/');
+                let scoredProjects = allProjects.map((proj) => {
+                    const [owner, projectName] = proj.name.split("/");
                     const key = proj.name.toLowerCase();
                     const onPypi = pypiMap.has(key);
+                    const isTopPypi = topPypiMap.has(key);
                     const baseScore = proj.score || 0;
 
                     // Start from the base GitHub score produced by the backend.
                     let finalScore = baseScore;
 
-                    // If the project has a PyPI package, add a bonus:
-                    // bonus = PYPI_GAP_BONUS_RATE * (MAX_SSR_SCORE - baseScore).
-                    // This pulls lower-scoring projects up more and high-scoring ones a bit less.
+                    // Tier 1: any PyPI package
                     if (onPypi) {
-                        const bonus = PYPI_GAP_BONUS_RATE * Math.max(0, MAX_SSR_SCORE - baseScore);
-                        finalScore = baseScore + bonus;
+                        finalScore *= PYPI_TIER1_MULTIPLIER;
                     }
-
-                    // Clamp to the theoretical max to avoid small overshoots.
-                    finalScore = Math.min(MAX_SSR_SCORE, finalScore);
+                    // Tier 2: high-impact PyPI package (subset of Tier 1)
+                    if (isTopPypi) {
+                        finalScore *= PYPI_TIER2_MULTIPLIER;
+                    }
                     
                     return {
                         ...proj,
-                        owner: owner,
+                        owner,
                         name: projectName,
                         full_name: proj.name,
                         url: proj.html_url,
                         original_score: baseScore,
                         final_score: Math.round(finalScore),
-                        on_pypi: onPypi
+                        on_pypi: onPypi,
+                        top_pypi: isTopPypi
                     };
                 });
                 
@@ -201,10 +222,14 @@ export default function PythonRankingsPage() {
                 // Load remaining pages in background
                 if (pythonPages > initialPages && !isScrolling) {
                     const batchSize = 50;
-                    for (let batchStart = initialPages + 1; batchStart <= pythonPages; batchStart += batchSize) {
+                    for (
+                        let batchStart = initialPages + 1;
+                        batchStart <= pythonPages;
+                        batchStart += batchSize
+                    ) {
                         // Check if scrolling before each batch
                         if (isScrolling) {
-                            console.log('⏸️ Pausing background loading due to scroll');
+                            console.log("⏸️ Pausing background loading due to scroll");
                             break;
                         }
                         
@@ -214,62 +239,55 @@ export default function PythonRankingsPage() {
                         for (let i = batchStart; i <= batchEnd; i++) {
                             batchPromises.push(
                                 fetch(`${process.env.PUBLIC_URL}/pages/python/page_${i}.json`)
-                                    .then(res => res.json())
+                                    .then((res) => res.json())
                                     .catch(() => [])
                             );
                         }
                         
                         const batchPages = await Promise.all(batchPromises);
-                        batchPages.forEach(pageData => {
+                        batchPages.forEach((pageData) => {
                             allProjects.push(...pageData);
                         });
                         
                         // Recalculate and update all projects
-                        scoredProjects = allProjects.map(proj => {
-                            const [owner, projectName] = proj.name.split('/');
+                        scoredProjects = allProjects.map((proj) => {
+                            const [owner, projectName] = proj.name.split("/");
                             const key = proj.name.toLowerCase();
                             const onPypi = pypiMap.has(key);
+                            const isTopPypi = topPypiMap.has(key);
                             const baseScore = proj.score || 0;
 
-                            // Start from the base GitHub score produced by the backend.
                             let finalScore = baseScore;
-
-                            // If the project has a PyPI package, add a bonus:
-                            // bonus = PYPI_GAP_BONUS_RATE * (MAX_SSR_SCORE - baseScore).
-                            // This pulls lower-scoring projects up more and high-scoring ones a bit less.
                             if (onPypi) {
-                                const bonus = PYPI_GAP_BONUS_RATE * Math.max(0, MAX_SSR_SCORE - baseScore);
-                                finalScore = baseScore + bonus;
+                                finalScore *= PYPI_TIER1_MULTIPLIER;
                             }
-
-                            // Clamp to the theoretical max to avoid small overshoots.
-                            finalScore = Math.min(MAX_SSR_SCORE, finalScore);
+                            if (isTopPypi) {
+                                finalScore *= PYPI_TIER2_MULTIPLIER;
+                            }
                             
                             return {
                                 ...proj,
-                                owner: owner,
+                                owner,
                                 name: projectName,
                                 full_name: proj.name,
                                 url: proj.html_url,
                                 original_score: baseScore,
                                 final_score: Math.round(finalScore),
-                                on_pypi: onPypi
+                                on_pypi: onPypi,
+                                top_pypi: isTopPypi
                             };
                         });
                         
                         scoredProjects.sort((a, b) => {
-                            // Primary: sort by score (descending)
                             if (b.final_score !== a.final_score) {
                                 return b.final_score - a.final_score;
                             }
-                            // Secondary: PyPI projects rank higher when scores are equal
                             if (a.on_pypi !== b.on_pypi) {
                                 return b.on_pypi ? 1 : -1;
                             }
-                            // Tertiary: alphabetical by name
                             return a.full_name.localeCompare(b.full_name);
                         });
-                        // Add global rank
+
                         scoredProjects.forEach((proj, idx) => {
                             proj.global_rank = idx + 1;
                         });
@@ -305,7 +323,7 @@ export default function PythonRankingsPage() {
         
         // Get unique owners from loaded Python projects
         const ownerSet = new Set();
-        projects.forEach(p => {
+        projects.forEach((p) => {
             const ownerLower = p.owner.toLowerCase();
             if (ownerLower.startsWith(query)) {
                 ownerSet.add(p.owner);
@@ -313,32 +331,32 @@ export default function PythonRankingsPage() {
         });
         
         // Add owner suggestions
-        Array.from(ownerSet).forEach(owner => {
-            suggestions.push({ text: owner, type: 'owner', icon: '👤' });
+        Array.from(ownerSet).forEach((owner) => {
+            suggestions.push({ text: owner, type: "owner", icon: "👤" });
         });
         
         // Add popular Python-related topics
         const popularTopics = [
-            'machine-learning', 'deep-learning', 'artificial-intelligence', 'neural-networks',
-            'data-science', 'data-analysis', 'visualization', 'pandas', 'numpy',
-            'tensorflow', 'pytorch', 'scikit-learn', 'keras',
-            'web-scraping', 'flask', 'django', 'fastapi',
-            'api', 'rest', 'graphql', 'automation',
-            'testing', 'pytest', 'unittest',
-            'database', 'sql', 'nosql', 'mongodb', 'postgresql',
-            'cli', 'command-line', 'tool', 'utility',
-            'parser', 'compiler', 'interpreter'
+            "machine-learning", "deep-learning", "artificial-intelligence", "neural-networks",
+            "data-science", "data-analysis", "visualization", "pandas", "numpy",
+            "tensorflow", "pytorch", "scikit-learn", "keras",
+            "web-scraping", "flask", "django", "fastapi",
+            "api", "rest", "graphql", "automation",
+            "testing", "pytest", "unittest",
+            "database", "sql", "nosql", "mongodb", "postgresql",
+            "cli", "command-line", "tool", "utility",
+            "parser", "compiler", "interpreter"
         ];
         
-        popularTopics.forEach(topic => {
+        popularTopics.forEach((topic) => {
             if (topic.toLowerCase().includes(query)) {
-                suggestions.push({ text: topic, type: 'topic', icon: '🏷️' });
+                suggestions.push({ text: topic, type: "topic", icon: "🏷️" });
             }
         });
         
         // Sort: owners first, then topics; both alphabetically
         suggestions.sort((a, b) => {
-            if (a.type !== b.type) return a.type === 'owner' ? -1 : 1;
+            if (a.type !== b.type) return a.type === "owner" ? -1 : 1;
             return a.text.localeCompare(b.text);
         });
         
@@ -354,7 +372,7 @@ export default function PythonRankingsPage() {
 
         // Only clear when search is cleared
         if (!searchQuery.trim()) {
-            setDebouncedSearchQuery('');
+            setDebouncedSearchQuery("");
         }
     }, [searchQuery]);
 
@@ -366,11 +384,11 @@ export default function PythonRankingsPage() {
         // Update URL with search
         const newParams = new URLSearchParams(searchParams);
         if (searchQuery.trim()) {
-            newParams.set('search', searchQuery);
+            newParams.set("search", searchQuery);
         } else {
-            newParams.delete('search');
+            newParams.delete("search");
         }
-        newParams.set('page', '1');
+        newParams.set("page", "1");
         setSearchParams(newParams);
     };
 
@@ -378,7 +396,7 @@ export default function PythonRankingsPage() {
     const updatePage = (newPage) => {
         setCurrentPage(newPage);
         const newParams = new URLSearchParams(searchParams);
-        newParams.set('page', newPage.toString());
+        newParams.set("page", newPage.toString());
         setSearchParams(newParams);
     };
 
@@ -389,15 +407,15 @@ export default function PythonRankingsPage() {
         
         // If clicking the same owner, clear search and return to previous page
         if (activeOwner === ownerName) {
-            setSearchQuery('');
-            setDebouncedSearchQuery('');
+            setSearchQuery("");
+            setDebouncedSearchQuery("");
             setActiveOwner(null);
             // Return to the page we were on before the search
             const returnPage = pageBeforeSearchRef.current;
             setCurrentPage(returnPage);
             const newParams = new URLSearchParams(searchParams);
-            newParams.delete('search');
-            newParams.set('page', returnPage.toString());
+            newParams.delete("search");
+            newParams.set("page", returnPage.toString());
             setSearchParams(newParams);
         } else {
             // Remember current page before starting new owner search
@@ -409,19 +427,19 @@ export default function PythonRankingsPage() {
             setCurrentPage(1);
             // Update URL with search parameter
             const newParams = new URLSearchParams(searchParams);
-            newParams.set('search', ownerName);
-            newParams.set('page', '1');
+            newParams.set("search", ownerName);
+            newParams.set("page", "1");
             setSearchParams(newParams);
         }
         
         // Scroll to position between header and search bar after data loads
         setTimeout(() => {
-            const headerElement = document.querySelector('header');
+            const headerElement = document.querySelector("header");
             if (headerElement) {
                 const headerBottom = headerElement.getBoundingClientRect().bottom + window.pageYOffset;
                 // Use requestAnimationFrame for smoother scroll
                 requestAnimationFrame(() => {
-                    window.scrollTo({ top: headerBottom - 20, behavior: 'smooth' });
+                    window.scrollTo({ top: headerBottom - 20, behavior: "smooth" });
                 });
             }
         }, 500);
@@ -441,9 +459,9 @@ export default function PythonRankingsPage() {
             }
         };
 
-        document.addEventListener('mousedown', handleClickOutside);
+        document.addEventListener("mousedown", handleClickOutside);
         return () => {
-            document.removeEventListener('mousedown', handleClickOutside);
+            document.removeEventListener("mousedown", handleClickOutside);
         };
     }, []);
 
@@ -452,28 +470,37 @@ export default function PythonRankingsPage() {
         if (!debouncedSearchQuery.trim()) return projects;
         
         const query = debouncedSearchQuery.toLowerCase();
-        return projects.filter(p => 
-            p.name.toLowerCase().includes(query) ||
-            p.owner.toLowerCase().includes(query) ||
-            (p.description && p.description.toLowerCase().includes(query))
+        return projects.filter(
+            (p) =>
+                p.name.toLowerCase().includes(query) ||
+                p.owner.toLowerCase().includes(query) ||
+                (p.description && p.description.toLowerCase().includes(query))
         );
     }, [projects, debouncedSearchQuery]);
 
     // Pagination - use total from metadata when not searching
-    const displayTotal = debouncedSearchQuery.trim() ? filteredProjects.length : totalProjects;
-    const totalPages = Math.ceil((debouncedSearchQuery.trim() ? filteredProjects.length : totalProjects) / projectsPerPage);
+    const displayTotal = debouncedSearchQuery.trim()
+        ? filteredProjects.length
+        : totalProjects;
+    const totalPages = Math.ceil(
+        (debouncedSearchQuery.trim() ? filteredProjects.length : totalProjects) /
+            projectsPerPage
+    );
     const startIndex = (currentPage - 1) * projectsPerPage;
-    const currentProjects = filteredProjects.slice(startIndex, startIndex + projectsPerPage);
+    const currentProjects = filteredProjects.slice(
+        startIndex,
+        startIndex + projectsPerPage
+    );
 
     const handlePageChange = (page) => {
         if (page >= 1 && page <= totalPages) {
             updatePage(page);
             // Scroll to position between header and search bar
             setTimeout(() => {
-                const headerElement = document.querySelector('header');
+                const headerElement = document.querySelector("header");
                 if (headerElement) {
                     const headerBottom = headerElement.getBoundingClientRect().bottom + window.pageYOffset;
-                    window.scrollTo({ top: headerBottom - 20, behavior: 'smooth' });
+                    window.scrollTo({ top: headerBottom - 20, behavior: "smooth" });
                 }
             }, 100);
         }
@@ -504,13 +531,19 @@ export default function PythonRankingsPage() {
                         placeholder="🔍 Search projects..."
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        onFocus={() => searchSuggestions.length > 0 && setShowSuggestions(true)}
+                        onFocus={() =>
+                            searchSuggestions.length > 0 && setShowSuggestions(true)
+                        }
                         onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
+                            if (e.key === "Enter") {
                                 e.preventDefault();
-                                if (selectedSuggestionIndex >= 0 && searchSuggestions.length > 0) {
+                                if (
+                                    selectedSuggestionIndex >= 0 &&
+                                    searchSuggestions.length > 0
+                                ) {
                                     // Select suggestion and search
-                                    const selectedText = searchSuggestions[selectedSuggestionIndex].text;
+                                    const selectedText =
+                                        searchSuggestions[selectedSuggestionIndex].text;
                                     setSearchQuery(selectedText);
                                     setDebouncedSearchQuery(selectedText);
                                     setShowSuggestions(false);
@@ -525,15 +558,17 @@ export default function PythonRankingsPage() {
                             
                             if (!showSuggestions || searchSuggestions.length === 0) return;
                             
-                            if (e.key === 'ArrowDown') {
+                            if (e.key === "ArrowDown") {
                                 e.preventDefault();
-                                setSelectedSuggestionIndex(prev => 
+                                setSelectedSuggestionIndex((prev) =>
                                     prev < searchSuggestions.length - 1 ? prev + 1 : prev
                                 );
-                            } else if (e.key === 'ArrowUp') {
+                            } else if (e.key === "ArrowUp") {
                                 e.preventDefault();
-                                setSelectedSuggestionIndex(prev => prev > 0 ? prev - 1 : -1);
-                            } else if (e.key === 'Escape') {
+                                setSelectedSuggestionIndex((prev) =>
+                                    prev > 0 ? prev - 1 : -1
+                                );
+                            } else if (e.key === "Escape") {
                                 setShowSuggestions(false);
                                 setSelectedSuggestionIndex(-1);
                             }
@@ -543,8 +578,8 @@ export default function PythonRankingsPage() {
                         <button
                             className="clear-search-btn"
                             onClick={() => {
-                                setSearchQuery('');
-                                setDebouncedSearchQuery('');
+                                setSearchQuery("");
+                                setDebouncedSearchQuery("");
                                 setCurrentPage(1);
                                 setShowSuggestions(false);
                                 setActiveOwner(null);
@@ -561,7 +596,9 @@ export default function PythonRankingsPage() {
                             {searchSuggestions.map((suggestion, index) => (
                                 <div
                                     key={`${suggestion.type}-${suggestion.text}`}
-                                    className={`suggestion-item ${index === selectedSuggestionIndex ? 'selected' : ''}`}
+                                    className={`suggestion-item ${
+                                        index === selectedSuggestionIndex ? "selected" : ""
+                                    }`}
                                     onMouseDown={(e) => {
                                         e.preventDefault(); // Prevent input blur
                                         const selectedText = suggestion.text;
@@ -572,16 +609,22 @@ export default function PythonRankingsPage() {
                                         setSearchSuggestions([]);
                                         setCurrentPage(1);
                                     }}
-                                    onMouseEnter={() => setSelectedSuggestionIndex(index)}
+                                    onMouseEnter={() =>
+                                        setSelectedSuggestionIndex(index)
+                                    }
                                 >
                                     <div className="suggestion-left">
-                                        <span className="suggestion-icon">{suggestion.icon}</span>
-                                        <span className="suggestion-text">{suggestion.text}</span>
+                                        <span className="suggestion-icon">
+                                            {suggestion.icon}
+                                        </span>
+                                        <span className="suggestion-text">
+                                            {suggestion.text}
+                                        </span>
                                     </div>
-                                    {suggestion.type === 'owner' && (
+                                    {suggestion.type === "owner" && (
                                         <span className="suggestion-badge">User</span>
                                     )}
-                                    {suggestion.type === 'topic' && (
+                                    {suggestion.type === "topic" && (
                                         <span className="suggestion-badge">Topic</span>
                                     )}
                                 </div>
@@ -592,8 +635,17 @@ export default function PythonRankingsPage() {
             </div>
 
             {loading ? (
-                <div style={{ textAlign: "center", padding: "60px", color: "#7dd3fc" }}>
-                    <div className="spinner" style={{ margin: "0 auto 12px" }}></div>
+                <div
+                    style={{
+                        textAlign: "center",
+                        padding: "60px",
+                        color: "#7dd3fc"
+                    }}
+                >
+                    <div
+                        className="spinner"
+                        style={{ margin: "0 auto 12px" }}
+                    ></div>
                     Loading Python projects...
                 </div>
             ) : (
@@ -611,54 +663,92 @@ export default function PythonRankingsPage() {
                             </thead>
                             <tbody>
                                 {currentProjects.map((project, index) => {
-                                    const displayRank = project.global_rank || (startIndex + index + 1);
-                                    const barWidth = project.final_score > 0
-                                        ? Math.max(15, Math.min(100, (project.final_score / filteredProjects[0].final_score) * 100))
-                                        : 15;
+                                    const displayRank =
+                                        project.global_rank || startIndex + index + 1;
+                                    const barWidth =
+                                        project.final_score > 0
+                                            ? Math.max(
+                                                  15,
+                                                  Math.min(
+                                                      100,
+                                                      (project.final_score /
+                                                          filteredProjects[0].final_score) *
+                                                          100
+                                                  )
+                                              )
+                                            : 15;
 
                                     return (
-                                        <tr 
-                                            key={project.full_name} 
-                                            className={updatingRows ? 'row-updating' : ''}
-                                            style={updatingRows ? { animationDelay: `${index * 0.03}s` } : {}}
+                                        <tr
+                                            key={project.full_name}
+                                            className={updatingRows ? "row-updating" : ""}
+                                            style={
+                                                updatingRows
+                                                    ? {
+                                                          animationDelay: `${index * 0.03}s`
+                                                      }
+                                                    : {}
+                                            }
                                         >
                                             <td className="rank-col">#{displayRank}</td>
                                             <td className="owner-col">
                                                 <span
-                                                    className={`owner-link ${activeOwner === project.owner ? 'owner-active' : ''}`}
-                                                    onClick={() => handleOwnerClick(project.owner)}
-                                                    title={activeOwner === project.owner ? `Click to clear search` : `Search for ${project.owner}`}
+                                                    className={`owner-link ${
+                                                        activeOwner === project.owner
+                                                            ? "owner-active"
+                                                            : ""
+                                                    }`}
+                                                    onClick={() =>
+                                                        handleOwnerClick(project.owner)
+                                                    }
+                                                    title={
+                                                        activeOwner === project.owner
+                                                            ? `Click to clear search`
+                                                            : `Search for ${project.owner}`
+                                                    }
                                                 >
                                                     {project.owner}
                                                 </span>
                                             </td>
                                             <td className="chart-col">
-                                                <div 
+                                                <div
                                                     className="bar-container"
                                                     onMouseEnter={(e) => {
                                                         if (timeoutRef.current) {
-                                                            clearTimeout(timeoutRef.current);
+                                                            clearTimeout(
+                                                                timeoutRef.current
+                                                            );
                                                         }
                                                         
                                                         // Calculate tooltip position
                                                         const container = e.currentTarget;
-                                                        const rect = container.getBoundingClientRect();
-                                                        const viewportHeight = window.innerHeight;
+                                                        const rect =
+                                                            container.getBoundingClientRect();
+                                                        const viewportHeight =
+                                                            window.innerHeight;
                                                         const tooltipHeight = 200;
-                                                        const spaceBelow = viewportHeight - rect.bottom;
+                                                        const spaceBelow =
+                                                            viewportHeight - rect.bottom;
                                                         
                                                         // If not enough space below, show tooltip above
-                                                        const showAbove = spaceBelow < tooltipHeight + 20;
+                                                        const showAbove =
+                                                            spaceBelow <
+                                                            tooltipHeight + 20;
                                                         
                                                         setTooltipPosition({
                                                             [project.full_name]: showAbove
                                                         });
-                                                        setHoveredProject(project.full_name);
+                                                        setHoveredProject(
+                                                            project.full_name
+                                                        );
                                                     }}
                                                     onMouseLeave={() => {
-                                                        timeoutRef.current = setTimeout(() => {
-                                                            setHoveredProject(null);
-                                                        }, 150);
+                                                        timeoutRef.current = setTimeout(
+                                                            () => {
+                                                                setHoveredProject(null);
+                                                            },
+                                                            150
+                                                        );
                                                     }}
                                                 >
                                                     <a
@@ -669,55 +759,120 @@ export default function PythonRankingsPage() {
                                                     >
                                                         <div
                                                             className="bar"
-                                                            style={{ width: `${barWidth}%` }}
+                                                            style={{
+                                                                width: `${barWidth}%`
+                                                            }}
                                                         >
                                                             <span className="project-name">
                                                                 {project.name}
                                                                 {project.on_pypi && (
-                                                                    <span className="pypi-badge">PyPI</span>
+                                                                    <span className="pypi-badge">
+                                                                        PyPI
+                                                                    </span>
                                                                 )}
                                                             </span>
                                                         </div>
                                                     </a>
-                                                    {hoveredProject === project.full_name && (
-                                                        <div 
-                                                            className={`tooltip ${tooltipPosition[project.full_name] ? 'tooltip-above' : ''}`}
+                                                    {hoveredProject ===
+                                                        project.full_name && (
+                                                        <div
+                                                            className={`tooltip ${
+                                                                tooltipPosition[
+                                                                    project.full_name
+                                                                ]
+                                                                    ? "tooltip-above"
+                                                                    : ""
+                                                            }`}
                                                             onMouseEnter={() => {
-                                                                if (timeoutRef.current) {
-                                                                    clearTimeout(timeoutRef.current);
+                                                                if (
+                                                                    timeoutRef.current
+                                                                ) {
+                                                                    clearTimeout(
+                                                                        timeoutRef.current
+                                                                    );
                                                                 }
-                                                                setHoveredProject(project.full_name);
+                                                                setHoveredProject(
+                                                                    project.full_name
+                                                                );
                                                             }}
                                                             onMouseLeave={() => {
-                                                                setHoveredProject(null);
+                                                                setHoveredProject(
+                                                                    null
+                                                                );
                                                             }}
                                                         >
-                                                            <div className="tooltip-title">{project.name}</div>
+                                                            <div className="tooltip-title">
+                                                                {project.name}
+                                                            </div>
                                                             <div className="tooltip-desc">
-                                                                <div style={{ marginBottom: "8px" }}>
-                                                                    <strong>Language:</strong> {project.language}
+                                                                <div
+                                                                    style={{
+                                                                        marginBottom:
+                                                                            "8px"
+                                                                    }}
+                                                                >
+                                                                    <strong>
+                                                                        Language:
+                                                                    </strong>{" "}
+                                                                    {project.language}
                                                                 </div>
-                                                                {project.topics && project.topics.length > 0 && (
-                                                                    <div style={{ marginBottom: "8px" }}>
-                                                                        <strong>Tech Stack:</strong>{" "}
-                                                                        {project.topics.slice(0, 5).join(", ")}
-                                                                    </div>
-                                                                )}
-                                                                <div style={{ marginBottom: "8px" }}>
-                                                                    <strong>Description:</strong> {project.description || "No description available"}
+                                                                {project.topics &&
+                                                                    project.topics
+                                                                        .length >
+                                                                        0 && (
+                                                                        <div
+                                                                            style={{
+                                                                                marginBottom:
+                                                                                    "8px"
+                                                                            }}
+                                                                        >
+                                                                            <strong>
+                                                                                Tech
+                                                                                Stack:
+                                                                            </strong>{" "}
+                                                                            {project.topics
+                                                                                .slice(
+                                                                                    0,
+                                                                                    5
+                                                                                )
+                                                                                .join(
+                                                                                    ", "
+                                                                                )}
+                                                                        </div>
+                                                                    )}
+                                                                <div
+                                                                    style={{
+                                                                        marginBottom:
+                                                                            "8px"
+                                                                    }}
+                                                                >
+                                                                    <strong>
+                                                                        Description:
+                                                                    </strong>{" "}
+                                                                    {project.description ||
+                                                                        "No description available"}
                                                                 </div>
                                                                 <div>
-                                                                    ⭐ {project.stars.toLocaleString()} stars | 👁️{" "}
-                                                                    {(project.watchers || 0).toLocaleString()} watchers | 🔀{" "}
-                                                                    {project.forks.toLocaleString()} forks | 🐛{" "}
-                                                                    {project.issues.toLocaleString()} issues
+                                                                    ⭐{" "}
+                                                                    {project.stars.toLocaleString()}{" "}
+                                                                    stars | 👁️{" "}
+                                                                    {(project.watchers ||
+                                                                        0
+                                                                    ).toLocaleString()}{" "}
+                                                                    watchers | 🔀{" "}
+                                                                    {project.forks.toLocaleString()}{" "}
+                                                                    forks | 🐛{" "}
+                                                                    {project.issues.toLocaleString()}{" "}
+                                                                    issues
                                                                 </div>
                                                             </div>
                                                         </div>
                                                     )}
                                                 </div>
                                             </td>
-                                            <td className="score-col">{project.final_score.toLocaleString()}</td>
+                                            <td className="score-col">
+                                                {project.final_score.toLocaleString()}
+                                            </td>
                                         </tr>
                                     );
                                 })}
@@ -736,14 +891,25 @@ export default function PythonRankingsPage() {
                     >
                         {!debouncedSearchQuery.trim() ? (
                             <>
-                                Showing {startIndex + 1}-{Math.min(startIndex + projectsPerPage, filteredProjects.length)}{" "}
+                                Showing {startIndex + 1}-
+                                {Math.min(
+                                    startIndex + projectsPerPage,
+                                    filteredProjects.length
+                                )}{" "}
                                 of {displayTotal.toLocaleString()} projects
                             </>
                         ) : (
                             <>
-                                Showing {currentProjects.length > 0 ? startIndex + 1 : 0}-
-                                {currentProjects.length > 0 ? startIndex + currentProjects.length : 0}{" "}
-                                of {filteredProjects.length.toLocaleString()} matches
+                                Showing{" "}
+                                {currentProjects.length > 0
+                                    ? startIndex + 1
+                                    : 0}
+                                -
+                                {currentProjects.length > 0
+                                    ? startIndex + currentProjects.length
+                                    : 0}{" "}
+                                of{" "}
+                                {filteredProjects.length.toLocaleString()} matches
                             </>
                         )}
                     </div>
@@ -755,7 +921,14 @@ export default function PythonRankingsPage() {
                                 className="pagination-btn pagination-edge"
                                 onClick={() => {
                                     updatePage(1);
-                                    setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 100);
+                                    setTimeout(
+                                        () =>
+                                            window.scrollTo({
+                                                top: 0,
+                                                behavior: "smooth"
+                                            }),
+                                        100
+                                    );
                                 }}
                                 disabled={currentPage === 1}
                             >
@@ -763,7 +936,9 @@ export default function PythonRankingsPage() {
                             </button>
                             <button
                                 className="pagination-btn"
-                                onClick={() => handlePageChange(currentPage - 1)}
+                                onClick={() =>
+                                    handlePageChange(currentPage - 1)
+                                }
                                 disabled={currentPage === 1}
                             >
                                 ‹
@@ -773,36 +948,66 @@ export default function PythonRankingsPage() {
                                 <input
                                     type="number"
                                     className="page-input"
-                                    value={pageInput !== null ? pageInput : currentPage}
-                                    onChange={(e) => setPageInput(e.target.value)}
+                                    value={
+                                        pageInput !== null
+                                            ? pageInput
+                                            : currentPage
+                                    }
+                                    onChange={(e) =>
+                                        setPageInput(e.target.value)
+                                    }
                                     onFocus={(e) => {
                                         if (pageInput === null) {
-                                            setPageInput(currentPage.toString());
-                                            setTimeout(() => e.target.select(), 0);
+                                            setPageInput(
+                                                currentPage.toString()
+                                            );
+                                            setTimeout(
+                                                () => e.target.select(),
+                                                0
+                                            );
                                         }
                                     }}
                                     onKeyDown={(e) => {
-                                        if (e.key === 'Enter') {
+                                        if (e.key === "Enter") {
                                             e.preventDefault();
-                                            const pageNum = parseInt(pageInput);
-                                            if (pageNum >= 1 && pageNum <= totalPages) {
+                                            const pageNum = parseInt(
+                                                pageInput
+                                            );
+                                            if (
+                                                pageNum >= 1 &&
+                                                pageNum <= totalPages
+                                            ) {
                                                 handlePageChange(pageNum);
                                                 setPageInput(null);
                                             }
                                             e.target.blur();
-                                        } else if (e.key === 'Escape') {
+                                        } else if (e.key === "Escape") {
                                             setPageInput(null);
                                             e.target.blur();
-                                        } else if (e.key === 'ArrowUp') {
+                                        } else if (e.key === "ArrowUp") {
                                             e.preventDefault();
-                                            const current = parseInt(pageInput) || currentPage;
-                                            const newPage = Math.min(totalPages, current + 1);
-                                            setPageInput(newPage.toString());
-                                        } else if (e.key === 'ArrowDown') {
+                                            const current =
+                                                parseInt(pageInput) ||
+                                                currentPage;
+                                            const newPage = Math.min(
+                                                totalPages,
+                                                current + 1
+                                            );
+                                            setPageInput(
+                                                newPage.toString()
+                                            );
+                                        } else if (e.key === "ArrowDown") {
                                             e.preventDefault();
-                                            const current = parseInt(pageInput) || currentPage;
-                                            const newPage = Math.max(1, current - 1);
-                                            setPageInput(newPage.toString());
+                                            const current =
+                                                parseInt(pageInput) ||
+                                                currentPage;
+                                            const newPage = Math.max(
+                                                1,
+                                                current - 1
+                                            );
+                                            setPageInput(
+                                                newPage.toString()
+                                            );
                                         }
                                     }}
                                     onBlur={() => {
@@ -811,19 +1016,25 @@ export default function PythonRankingsPage() {
                                     min="1"
                                     max={totalPages}
                                 />
-                                <span className="page-total">/ {totalPages}</span>
+                                <span className="page-total">
+                                    / {totalPages}
+                                </span>
                             </div>
 
                             <button
                                 className="pagination-btn"
-                                onClick={() => handlePageChange(currentPage + 1)}
+                                onClick={() =>
+                                    handlePageChange(currentPage + 1)
+                                }
                                 disabled={currentPage === totalPages}
                             >
                                 ›
                             </button>
                             <button
                                 className="pagination-btn pagination-edge"
-                                onClick={() => handlePageChange(totalPages)}
+                                onClick={() =>
+                                    handlePageChange(totalPages)
+                                }
                                 disabled={currentPage === totalPages}
                             >
                                 »
